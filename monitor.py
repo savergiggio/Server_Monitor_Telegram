@@ -30,273 +30,86 @@ def check_ip_in_range(ip):
         return "false"
     except ValueError:
         return "true"  # In case of invalid IP, skip it
+check_ssh_activity() {
+    # Fetch the current SSH sessions
+    local current_logins=$(LC_ALL=C who -u | awk '{print $1, $8, $3, $4, $5, $7}') # Extract username, IP, date, time and pid
+    local last_logins=$(cat "$SSH_ACTIVITY_LOGINS" 2>/dev/null)
 
-def check_ssh_activity(config):
-    """Monitor active SSH sessions and detect new ones"""
-    if not config.get("notify_ssh", True):
-        return
+    # Update the saved state with the current SSH sessions
+    echo "$current_logins" > "$SSH_ACTIVITY_LOGINS"
 
-    try:
-        # Ottieni la lista di IP esclusi dal config
-        excluded_ips = config.get("excluded_ips", EXCLUDED_IPS)
-        
-        # Debugging
-        print("DEBUG: Verificando sessioni SSH attive")
-        
-        # Fetch the current SSH sessions using the 'who' command - prova diversi approcci
-        who_output = ""
-        try:
-            who_output = subprocess.check_output("who -u", shell=True, text=True)
-        except subprocess.CalledProcessError:
-            try:
-                # Fallback se who -u non funziona
-                who_output = subprocess.check_output("who", shell=True, text=True)
-            except:
-                try:
-                    # Ultimo tentativo
-                    who_output = subprocess.check_output("w -h", shell=True, text=True)
-                except:
-                    print("DEBUG: Impossibile ottenere informazioni sugli utenti connessi")
-                    return
-        
-        print(f"DEBUG: Output del comando who:\n{who_output}")
-        current_logins = []
-        
-        for line in who_output.splitlines():
-            parts = line.split()
-            if len(parts) >= 5:  # Verifica che ci siano abbastanza parti
-                username = parts[0]
-                
-                # Cerca l'indirizzo IP nella riga
-                ip = None
-                for part in parts:
-                    if '(' in part and ')' in part:
-                        ip = part.replace("(", "").replace(")", "")
-                        break
-                
-                # Se non trova l'IP nel formato standard, prova a estrarlo come ultimo elemento
-                if not ip and len(parts) >= 5:
-                    possible_ip = parts[-3]
-                    if re.match(r'\d+\.\d+\.\d+\.\d+', possible_ip):
-                        ip = possible_ip
-                
-                if not ip:  # Se ancora non abbiamo un IP, usa un valore di fallback
-                    ip = "unknown"
-                    
-                # Estrai la data se possibile
-                login_date = datetime.now().strftime("%b %d %H:%M")
-                if len(parts) >= 3:
-                    try:
-                        login_date = f"{parts[2]} {parts[3]} {parts[4]}"
-                    except:
-                        pass  # Usa il valore predefinito se c'è un errore
-                
-                # Estrai PID se disponibile
-                pid = "unknown"
-                for i, part in enumerate(parts):
-                    if i > 0 and re.match(r'^\d+$', part):
-                        pid = part
-                        break
-                
-                current_logins.append(f"{username} {ip} {login_date} {pid}")
-        
-        print(f"DEBUG: Login attuali: {current_logins}")
-        
-        # Read the last recorded state
-        last_logins = []
-        if os.path.exists(SSH_ACTIVITY_LOGINS):
-            with open(SSH_ACTIVITY_LOGINS, "r") as f:
-                last_logins = f.read().splitlines()
-        
-        print(f"DEBUG: Login precedenti: {last_logins}")
-        
-        # Update the saved state
-        with open(SSH_ACTIVITY_LOGINS, "w") as f:
-            f.write("\n".join(current_logins))
-        
-        # Check for new sessions
-        for current_login in current_logins:
-            if current_login not in last_logins:
-                print(f"DEBUG: Rilevato nuovo login: {current_login}")
-                parts = current_login.split()
-                username = parts[0]
-                ip = parts[1]
-                login_time = datetime.now().strftime("%H:%M")
-                if len(parts) >= 3:
-                    try:
-                        login_time = parts[2] + " " + parts[3]
-                    except:
-                        pass  # Usa il valore predefinito
-                
-                # Check if the IP is within any of the excluded ranges
-                is_excluded = False
-                for excluded_ip in excluded_ips:
-                    if "/" in excluded_ip:  # Check if it's a CIDR range
-                        try:
-                            if ipaddress.ip_address(ip) in ipaddress.ip_network(excluded_ip, strict=False):
-                                is_excluded = True
-                                break
-                        except:
-                            pass  # Se l'IP non è valido, continua
-                    elif ip == excluded_ip:  # Direct match
-                        is_excluded = True
-                        break
-                
-                if not is_excluded and ip != "unknown":
-                    message = f"🔐 Nuovo login SSH: Utente *[ {username} ]* da IP *{ip}* alle {login_time}."
-                    print(message)
-                    send_alert(message)
-                else:
-                    print(f"Nuovo login SSH: Utente *[ {username} ]* da IP *{ip}*. IP escluso o sconosciuto, nessun avviso inviato.")
-    
-    except Exception as e:
-        print(f"Errore nel controllo dell'attività SSH: {e}")
-        import traceback
-        traceback.print_exc()
+    # Loop through the current logins to identify new sessions
+    while IFS= read -r current_login; do
+        # If the current session is not in the last recorded state, it's new
+        if ! grep -Fq "$current_login" <<< "$last_logins"; then
+            local user=$(echo "$current_login" | awk '{print $1}')
+            local ip=$(echo "$current_login" | awk '{print $2}' | tr -d '()')
+            local login_time=$(echo "$current_login" | awk '{print $3, $4, $5}')
+            local formatted_time=$(LC_ALL=C date -d "$login_time" +"%H:%M" 2>/dev/null)
 
-def check_sftp_activity(config):
-    """Monitor active SFTP sessions and detect new ones"""
-    if not config.get("notify_sftp", True):
-        return
+            # Check if the IP is within any of the excluded CIDR ranges or exact matches
+            if [[ $(check_ip_in_range "$ip") == "false" ]]; then
+                # Prepare and send the alert message
+                local message="New SSH login: User *[ $user ]* from IP *$ip* at $formatted_time."
+                echo "$message"  # Echo the message to the terminal for logging
+                send_telegram_alert "SSH-LOGIN" "$message"
+            else
+                echo "New SSH login: User *[ $user ]* from IP *$ip*. IP excluded, no alerts send."
+            fi
+        fi
+    done <<< "$current_logins"
+}
 
-    try:
-        # Ottieni la lista di IP esclusi dal config
-        excluded_ips = config.get("excluded_ips", EXCLUDED_IPS)
-        
-        print("DEBUG: Verificando sessioni SFTP attive")
-        
-        # Prova diversi approcci per trovare i processi sftp-server
-        try:
-            ps_output = subprocess.check_output("ps -eo pid,ppid,lstart,cmd | grep [s]ftp-server", shell=True, text=True)
-        except subprocess.CalledProcessError:
-            try:
-                # Secondo tentativo con formato diverso
-                ps_output = subprocess.check_output("ps ax | grep [s]ftp-server", shell=True, text=True)
-            except:
-                # No sftp processes found, return empty
-                print("DEBUG: Nessun processo sftp-server trovato")
-                return
-        
-        print(f"DEBUG: Output del comando ps:\n{ps_output}")
-        current_sessions = []
-        
-        for line in ps_output.splitlines():
-            if not line.strip():
-                continue
-                
-            # Verifica che la riga contenga effettivamente 'sftp-server'
-            if "sftp-server" not in line:
-                continue
-                
-            parts = line.split()
-            if len(parts) >= 2:
-                # Estrai PID e PPID (se disponibili)
-                pid = parts[0]
-                ppid = parts[1] if len(parts) > 1 else "unknown"
-                
-                # Genera un identificatore unico per questa sessione
-                session_id = f"{pid} {ppid}"
-                current_sessions.append(session_id)
-        
-        print(f"DEBUG: Sessioni SFTP attuali: {current_sessions}")
-        
-        # Read the last recorded sessions
-        last_sessions = []
-        if os.path.exists(SFTP_ACTIVITY_LOGINS):
-            with open(SFTP_ACTIVITY_LOGINS, "r") as f:
-                last_sessions = f.read().splitlines()
-        
-        print(f"DEBUG: Sessioni SFTP precedenti: {last_sessions}")
-        
-        # Check for new sessions - prima salviamo lo stato attuale
-        with open(SFTP_ACTIVITY_LOGINS, "w") as f:
-            f.write("\n".join(current_sessions))
-        
-                    # Ora controlliamo le nuove sessioni
-        for current_session in current_sessions:
-            if current_session not in last_sessions:
-                print(f"DEBUG: Rilevata nuova sessione SFTP: {current_session}")
-                parts = current_session.split()
-                if not parts:
-                    continue
-                    
-                pid = parts[0]
-                if not pid.isdigit():
-                    continue
-                
-                # Prova diversi metodi per determinare la connessione di rete
-                src_ip = None
-                
-                # Metodo 1: Usa ss
-                try:
-                    ss_output = subprocess.check_output(f"ss -tnp | grep {pid}", shell=True, text=True)
-                    print(f"DEBUG: Output ss per PID {pid}:\n{ss_output}")
-                    
-                    # Cerca un indirizzo IP nel formato standard
-                    ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+):', ss_output)
-                    if ip_match:
-                        src_ip = ip_match.group(1)
-                except:
-                    pass
-                
-                # Metodo 2: Prova con netstat se ss ha fallito
-                if not src_ip:
-                    try:
-                        netstat_output = subprocess.check_output(f"netstat -tnp 2>/dev/null | grep {pid}", shell=True, text=True)
-                        print(f"DEBUG: Output netstat per PID {pid}:\n{netstat_output}")
-                        
-                        ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+):', netstat_output)
-                        if ip_match:
-                            src_ip = ip_match.group(1)
-                    except:
-                        pass
-                
-                # Metodo 3: Prova lsof come ultimo tentativo
-                if not src_ip:
-                    try:
-                        lsof_output = subprocess.check_output(f"lsof -p {pid} -a -i -n", shell=True, text=True)
-                        print(f"DEBUG: Output lsof per PID {pid}:\n{lsof_output}")
-                        
-                        ip_match = re.search(r'(\d+\.\d+\.\d+\.\d+):', lsof_output)
-                        if ip_match:
-                            src_ip = ip_match.group(1)
-                    except:
-                        pass
-                
-                # Se abbiamo trovato un indirizzo IP, controlliamo se è escluso
-                if src_ip:
-                    print(f"DEBUG: Trovato IP per sessione SFTP: {src_ip}")
-                    
-                    # Controlla se l'IP rientra nelle esclusioni
-                    is_excluded = False
-                    for excluded_ip in excluded_ips:
-                        if "/" in excluded_ip:  # Check if it's a CIDR range
-                            try:
-                                if ipaddress.ip_address(src_ip) in ipaddress.ip_network(excluded_ip, strict=False):
-                                    is_excluded = True
-                                    break
-                            except:
-                                pass  # Se l'IP non è valido, continua
-                        elif src_ip == excluded_ip:  # Direct match
-                            is_excluded = True
-                            break
-                    
-                    if not is_excluded:
-                        formatted_time = datetime.now().strftime("%H:%M")
-                        message = f"📁 Nuova sessione SFTP: Da IP *{src_ip}* alle {formatted_time}"
-                        print(message)
-                        send_alert(message)
-                    else:
-                        print(f"Nuova sessione SFTP da IP *{src_ip}*. IP escluso, nessun avviso inviato.")
-                else:
-                    print(f"DEBUG: Impossibile determinare l'IP per la sessione SFTP con PID {pid}")
-                
-    except Exception as e:
-        print(f"Errore nel controllo dell'attività SFTP: {e}")
-        import traceback
-        traceback.print_exc()
 
-last_uptime = None
+# Function to check for new SFTP sessions
+# This function monitors active SFTP sessions by comparing the current sessions against a previously saved list.
+# It extracts each session's PID, start time, and associated network connections.
+# If a session is not in the saved list and the source IP isn't excluded based on predefined criteria,
+# it sends a Telegram alert with detailed connection information.
+# After checking, the function updates the saved list with current session details to log new sessions for future comparisons.
+# The goal is to monitor and alert on unauthorized or unexpected SFTP activity from non-excluded IP ranges.
+check_sftp_activity() {
+    # Fetch all PIDs for sftp-server processes along with their start times, parent PIDs, and full command
+    local current_sessions=$(LC_ALL=C ps -eo pid,ppid,lstart,cmd | grep [s]ftp-server | awk '{print $1, $2, $3, $4, $5, $6}')
+
+    # Read the last recorded session details from the log file and remove any leading/trailing whitespace
+    local last_sessions=$(cat "$SFTP_ACTIVITY_LOGINS" 2>/dev/null | sed 's/^[ \t]*//;s/[ \t]*$//')
+
+    # Loop through each current session to check if it's new
+    while IFS= read -r current_session; do
+        # Trim spaces from current session string for accurate comparison
+        local trimmed_session=$(echo "$current_session" | sed 's/^[ \t]*//;s/[ \t]*$//')
+
+        # Check if this session is already recorded to avoid duplicates
+        if ! grep -Fq "$trimmed_session" <<< "$last_sessions"; then
+            local pid=$(echo "$trimmed_session" | awk '{print $1}')    # Extract the PID
+            local ppid=$(echo "$trimmed_session" | awk '{print $2}')   # Extract the Parent PID
+	    local raw_date=$(echo "$current_session" | awk '{print $3, $4, $5, $6}') # Extract the full date string as it appears
+            local stime=$(LC_ALL=C date -d "$raw_date" +"%Y-%m-%d %H:%M")  # Format the start time correctly based on extracted raw date
+            local htime=$(LC_ALL=C date -d "$raw_date" +"%H:%M")  # Format the start time correctly based on extracted raw date
+
+            # Use 'ss' to fetch network connections associated with the PID or its parent
+            local connection_details=$(ss -tnp | grep -E "pid=$pid|pid=$ppid" | awk '{split($4, a, ":"); split($5, b, ":"); if (length(a[1]) > 0 && length(b[1]) > 0) print a[1], "<->", b[1]}')
+
+            # Parse source IP from connection details
+            local src_ip=$(echo "$connection_details" | awk '{print $3}')
+
+            # Check if the IP is within any of the excluded ranges
+            if [[ $(check_ip_in_range "$src_ip") == "false" ]]; then
+                # Check if there are valid network details to report
+                if [ -n "$connection_details" ]; then
+		    local message="New SFTP session: From IP *${src_ip}* at ${htime}"
+
+                    echo "$message"  # Output the message to terminal for logging
+                    send_telegram_alert "SFTP-MONITOR" "$message"  # Send the alert message through Telegram
+                    echo "$trimmed_session $stime ${connection_details}" >> "$SFTP_ACTIVITY_LOGINS"
+                fi
+            else
+                echo "New SFTP session from *$src_ip*. IP excluded, no alerts send."
+            fi
+        fi
+    done <<< "$current_sessions"
+}
 
 def monitor_loop():
     global last_uptime
