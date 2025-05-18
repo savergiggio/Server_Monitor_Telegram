@@ -7,7 +7,12 @@ services:
     volumes:
       - /var/log:/host/var/log:ro
       - /proc:/host/proc:ro
+      - /tmp:/tmp  # Aggiunto per consentire la persistenza dei file di monitoraggio
+
     environment:
-      - BOT_TOKEN=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-      - CHAT_ID=XXXXXXXX
+      - BOT_TOKEN=token
+      - CHAT_ID=id
     restart: always
+    cap_add:
+      - NET_ADMIN  # Aggiunto per consentire l'accesso a informazioni di rete
+    network_mode: "host"  # Permette al container di accedere direttamente alla rete dell'host
