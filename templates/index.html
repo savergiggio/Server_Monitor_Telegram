@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head><title>Monitor Config</title></head>
+<body>
+  <h1>Configurazione Monitor</h1>
+  <form method="POST">
+    <label>CPU Threshold (%): <input type="number" name="cpu" value="{{ config.cpu_threshold }}"></label><br>
+    <label>RAM Threshold (%): <input type="number" name="ram" value="{{ config.ram_threshold }}"></label><br>
+    <label>DISK Threshold (%): <input type="number" name="disk" value="{{ config.disk_threshold }}"></label><br>
+    <label>NET Threshold (bytes/sec): <input type="number" name="net" value="{{ config.net_threshold }}"></label><br><br>
+
+    <input type="checkbox" name="ssh" {% if config.notify_ssh %}checked{% endif %}> Notifica login SSH<br>
+    <input type="checkbox" name="sftp" {% if config.notify_sftp %}checked{% endif %}> Notifica login SFTP<br>
+    <input type="checkbox" name="reboot" {% if config.notify_reboot %}checked{% endif %}> Notifica reboot<br><br>
+
+    <button type="submit">Salva</button>
+  </form>
+</body>
+</html>
