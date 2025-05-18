@@ -1,0 +1,9 @@
+{
+    "cpu_threshold": 80,
+    "ram_threshold": 80,
+    "disk_threshold": 90,
+    "net_threshold": 1000000,
+    "notify_ssh": true,
+    "notify_sftp": true,
+    "notify_reboot": true
+}

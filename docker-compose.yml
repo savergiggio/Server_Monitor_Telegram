@@ -1,0 +1,13 @@
+version: '3.8'
+services:
+  server-monitor:
+    build: .
+    ports:
+      - "8181:5000"
+    volumes:
+      - /var/log:/host/var/log:ro
+      - /proc:/host/proc:ro
+    environment:
+      - BOT_TOKEN=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+      - CHAT_ID=XXXXXXXX
+    restart: always
