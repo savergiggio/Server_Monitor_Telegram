@@ -3,13 +3,14 @@ FROM python:3.11-slim
 WORKDIR /app
 COPY . .
 
-# Installa dipendenze di sistema necessarie per il monitoraggio di rete
+# Installa dipendenze di sistema necessarie per il monitoraggio di rete e log
 RUN apt-get update && apt-get install -y \
     procps \
     iproute2 \
     net-tools \
     lsof \
     iputils-ping \
+    hostname \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install -r requirements.txt
