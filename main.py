@@ -19,7 +19,6 @@ def index():
             "disk_threshold": int(request.form["disk"]),
             "net_threshold": int(request.form["net"]),
             "notify_ssh": "ssh" in request.form,
-            "notify_sftp": "sftp" in request.form,
             "notify_reboot": "reboot" in request.form,
             "excluded_ips": excluded_ips
         }
