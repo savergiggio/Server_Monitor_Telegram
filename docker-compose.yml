@@ -10,8 +10,8 @@ services:
       - /tmp:/tmp  # Aggiunto per consentire la persistenza dei file di monitoraggio
 
     environment:
-      - BOT_TOKEN=token
-      - CHAT_ID=id
+      - BOT_TOKEN=xxxxxxxxxxxxxxx
+      - CHAT_ID=1xxxxxxxxxxxxx
     restart: always
     cap_add:
       - NET_ADMIN  # Aggiunto per consentire l'accesso a informazioni di rete
