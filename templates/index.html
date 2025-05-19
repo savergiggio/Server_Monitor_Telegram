@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Server Monitor Config</title>
+  <title>Monitor Config</title>
   <style>
     body {
       font-family: Arial, sans-serif;
@@ -39,28 +39,10 @@
     h2 {
       color: #333;
     }
-    #test-telegram-btn {
-      background-color: #3498db;
-      margin-left: 10px;
-    }
-    .result-message {
-      margin-top: 10px;
-      padding: 10px;
-      border-radius: 4px;
-      display: none;
-    }
-    .success {
-      background-color: #d4edda;
-      color: #155724;
-    }
-    .error {
-      background-color: #f8d7da;
-      color: #721c24;
-    }
   </style>
 </head>
 <body>
-  <h1>Configurazione Server Monitor</h1>
+  <h1>Configurazione Monitor</h1>
   <form method="POST">
     <div class="section">
       <h2>Soglie di Allarme</h2>
@@ -89,10 +71,6 @@
         <label for="ssh">Notifica login SSH</label>
       </div>
       <div class="checkbox-group">
-        <input type="checkbox" id="sftp" name="sftp" {% if config.notify_sftp %}checked{% endif %}>
-        <label for="sftp">Notifica login SFTP</label>
-      </div>
-      <div class="checkbox-group">
         <input type="checkbox" id="reboot" name="reboot" {% if config.notify_reboot %}checked{% endif %}>
         <label for="reboot">Notifica reboot</label>
       </div>
@@ -101,8 +79,8 @@
     <div class="section">
       <h2>Visualizzazione Processi</h2>
       <div class="form-group">
-        <label>Numero di processi da visualizzare: </label>
-        <input type="number" name="top_processes" value="{{ config.top_processes }}" min="1" max="20">
+        <label>Numero predefinito di processi da visualizzare: </label>
+        <input type="number" name="top_processes" value="{{ config.top_processes if config.top_processes else 5 }}" min="1" max="20">
       </div>
     </div>
 
@@ -117,60 +95,7 @@
       </div>
     </div>
 
-    <div class="section">
-      <h2>Configurazione Telegram Bot</h2>
-      <div class="form-group">
-        <label>Bot Token: </label>
-        <input type="text" name="bot_token" value="{{ config.bot_token }}" style="width: 400px;">
-      </div>
-      <div class="form-group">
-        <label>Chat ID: </label>
-        <input type="text" name="chat_id" value="{{ config.chat_id }}" style="width: 200px;">
-      </div>
-    </div>
-
-    <button type="submit">Salva Configurazione</button>
-    <button type="button" id="test-telegram-btn">Test Telegram</button>
-    <div id="result-message" class="result-message"></div>
+    <button type="submit">Salva</button>
   </form>
-
-  <script>
-    document.getElementById('test-telegram-btn').addEventListener('click', function() {
-      var botToken = document.querySelector('input[name="bot_token"]').value;
-      var chatId = document.querySelector('input[name="chat_id"]').value;
-      var resultDiv = document.getElementById('result-message');
-      
-      if (!botToken || !chatId) {
-        resultDiv.textContent = 'Token del bot o Chat ID mancanti';
-        resultDiv.className = 'result-message error';
-        resultDiv.style.display = 'block';
-        return;
-      }
-      
-      resultDiv.textContent = 'Invio messaggio di test...';
-      resultDiv.className = 'result-message';
-      resultDiv.style.display = 'block';
-      
-      // Create form data
-      var formData = new FormData();
-      formData.append('bot_token', botToken);
-      formData.append('chat_id', chatId);
-      
-      // Send test request
-      fetch('/test_telegram', {
-        method: 'POST',
-        body: formData
-      })
-      .then(response => response.json())
-      .then(data => {
-        resultDiv.textContent = data.message;
-        resultDiv.className = data.success ? 'result-message success' : 'result-message error';
-      })
-      .catch(error => {
-        resultDiv.textContent = 'Errore di connessione: ' + error;
-        resultDiv.className = 'result-message error';
-      });
-    });
-  </script>
 </body>
 </html>
