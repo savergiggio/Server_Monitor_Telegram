@@ -6,14 +6,11 @@ import ipaddress
 import subprocess
 import requests
 from pathlib import Path
-import socket
-from collections import defaultdict
 
 CONFIG_FILE = "config.json"
 AUTH_LOG_FILE = "/host/var/log/auth.log"  # Percorso al file auth.log all'interno del container
 LAST_LOG_POSITION = "/tmp/last_log_position.txt"  # File per memorizzare l'ultima posizione di lettura
 EXCLUDED_IPS = ["127.0.0.1", "192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]  # Default excluded IPs/ranges
-TOP_PROCESSES_DEFAULT = 5  # Numero di default di processi da visualizzare
 
 def load_config():
     with open(CONFIG_FILE) as f:
@@ -235,6 +232,140 @@ def get_uptime():
                 return float(f.readline().split()[0])
         except:
             return 0  # Se non riusciamo a leggere l'uptime, restituiamo 0
+
+
+# Aggiungi queste funzioni al file monitor.py
+
+def get_system_resources():
+    """Ottiene informazioni su CPU e RAM"""
+    try:
+        cpu = psutil.cpu_percent(interval=1)
+        ram = psutil.virtual_memory()
+        swap = psutil.swap_memory()
+        
+        # Ottiene il carico di sistema (1, 5, 15 minuti)
+        try:
+            load_avg = os.getloadavg()
+            load_str = f"Load avg: {load_avg[0]:.2f}, {load_avg[1]:.2f}, {load_avg[2]:.2f}"
+        except:
+            load_str = "Load avg: non disponibile"
+            
+        uptime_seconds = get_uptime()
+        days, remainder = divmod(int(uptime_seconds), 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        uptime_str = f"{days}d {hours}h {minutes}m {seconds}s"
+        
+        return (f"*Risorse di Sistema*\n"
+                f"CPU: *{cpu}%*\n"
+                f"RAM: *{ram.percent}%* ({ram.used // (1024*1024)} MB / {ram.total // (1024*1024)} MB)\n"
+                f"Swap: *{swap.percent}%* ({swap.used // (1024*1024)} MB / {swap.total // (1024*1024)} MB)\n"
+                f"{load_str}\n"
+                f"Uptime: {uptime_str}")
+    except Exception as e:
+        return f"Errore nel recupero delle risorse: {e}"
+
+def get_disk_info():
+    """Ottiene informazioni sull'utilizzo del disco"""
+    try:
+        disk = psutil.disk_usage("/")
+        
+        # Formatta le dimensioni in GB
+        used_gb = disk.used / (1024**3)
+        total_gb = disk.total / (1024**3)
+        free_gb = disk.free / (1024**3)
+        
+        # Ottiene le partizioni
+        partitions = psutil.disk_partitions()
+        partitions_info = ""
+        
+        for i, part in enumerate(partitions[:5]):  # Limita a 5 partizioni per non intasare il messaggio
+            if "loop" not in part.device:  # Ignora i dispositivi loop
+                try:
+                    usage = psutil.disk_usage(part.mountpoint)
+                    partitions_info += (f"\n{part.device} ({part.mountpoint}): "
+                                       f"{usage.percent}% usato "
+                                       f"({usage.used / (1024**3):.1f} GB / {usage.total / (1024**3):.1f} GB)")
+                except:
+                    pass
+        
+        if len(partitions) > 5:
+            partitions_info += f"\n... e altre {len(partitions) - 5} partizioni"
+            
+        return (f"*Informazioni Disco*\n"
+                f"Root Usage: *{disk.percent}%*\n"
+                f"Usato: {used_gb:.1f} GB\n"
+                f"Libero: {free_gb:.1f} GB\n"
+                f"Totale: {total_gb:.1f} GB\n"
+                f"*Partizioni*:{partitions_info}")
+    except Exception as e:
+        return f"Errore nel recupero delle informazioni sul disco: {e}"
+
+def get_network_info():
+    """Ottiene informazioni sul traffico di rete"""
+    try:
+        # Ottieni le statistiche di rete
+        net_io = psutil.net_io_counters()
+        
+        # Converti in formato leggibile
+        sent_mb = net_io.bytes_sent / (1024**2)
+        recv_mb = net_io.bytes_recv / (1024**2)
+        
+        # Ottieni le connessioni attive
+        connections = psutil.net_connections()
+        established = sum(1 for conn in connections if conn.status == 'ESTABLISHED')
+        listen = sum(1 for conn in connections if conn.status == 'LISTEN')
+        
+        # Ottieni le informazioni sulle interfacce di rete
+        net_if = psutil.net_if_addrs()
+        interfaces = []
+        
+        for interface, addresses in net_if.items():
+            for addr in addresses:
+                if addr.family == socket.AF_INET:  # Solo IPv4
+                    interfaces.append(f"{interface}: {addr.address}")
+                    break
+        
+        return (f"*Informazioni Rete*\n"
+                f"Dati inviati: {sent_mb:.2f} MB\n"
+                f"Dati ricevuti: {recv_mb:.2f} MB\n"
+                f"Connessioni stabilite: {established}\n"
+                f"Porte in ascolto: {listen}\n"
+                f"*Interfacce*:\n" + "\n".join(interfaces[:5]))  # Limita a 5 interfacce
+    except Exception as e:
+        return f"Errore nel recupero delle informazioni di rete: {e}"
+
+def get_top_processes(limit=5):
+    """Ottiene i processi che utilizzano più risorse"""
+    try:
+        # Ottieni tutti i processi
+        processes = []
+        for proc in psutil.process_iter(['pid', 'name', 'username', 'cpu_percent', 'memory_percent', 'create_time']):
+            try:
+                pinfo = proc.info
+                pinfo['cpu_percent'] = proc.cpu_percent(interval=0.1)
+                processes.append(pinfo)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+        
+        # Ordina per utilizzo CPU (decrescente)
+        processes = sorted(processes, key=lambda p: p['cpu_percent'], reverse=True)
+        
+        # Limita al numero richiesto
+        top_processes = processes[:limit]
+        
+        result = f"*Top {limit} Processi (CPU)*\n"
+        result += "```\n"
+        result += f"{'PID':>7} {'CPU%':>6} {'MEM%':>6} {'USER':12} {'NAME'}\n"
+        result += "-" * 50 + "\n"
+        
+        for proc in top_processes:
+            result += f"{proc['pid']:7d} {proc['cpu_percent']:6.1f} {proc['memory_percent']:6.1f} {proc['username'][:12]:12} {proc['name']}\n"
+        
+        result += "```"
+        return result
+    except Exception as e:
+        return f"Errore nel recupero dei processi attivi: {e}"
 
 if __name__ == "__main__":
     monitor_loop()
