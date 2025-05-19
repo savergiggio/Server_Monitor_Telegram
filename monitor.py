@@ -1,218 +1,168 @@
-import time, json, psutil, os, subprocess
-from telegram_bot import send_alert
-from datetime import datetime
-import re
-import ipaddress
+import os
+import telegram
+import time
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters
 
-CONFIG_FILE = "config.json"
-SSH_ACTIVITY_LOGINS = "/tmp/ssh_activity_logins.txt"
-SFTP_ACTIVITY_LOGINS = "/tmp/sftp_activity_logins.txt"
-EXCLUDED_IPS = ["127.0.0.1", "192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]  # Default excluded IPs/ranges
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+BOT_INSTANCE = None
+UPDATER = None
 
-def load_config():
-    with open(CONFIG_FILE) as f:
-        return json.load(f)
-
-def check_ip_in_range(ip):
-    """Check if an IP address is within any of the excluded ranges"""
-    if not ip:
-        return "true"  # Skip empty IPs
-        
-    try:
-        ip_obj = ipaddress.ip_address(ip)
-        for excluded in EXCLUDED_IPS:
-            if "/" in excluded:  # This is a network range
-                if ip_obj in ipaddress.ip_network(excluded, strict=False):
-                    return "true"
-            else:  # This is a single IP
-                if ip == excluded:
-                    return "true"
-        return "false"
-    except ValueError:
-        return "true"  # In case of invalid IP, skip it
-check_ssh_activity() {
-    # Fetch the current SSH sessions
-    local current_logins=$(LC_ALL=C who -u | awk '{print $1, $8, $3, $4, $5, $7}') # Extract username, IP, date, time and pid
-    local last_logins=$(cat "$SSH_ACTIVITY_LOGINS" 2>/dev/null)
-
-    # Update the saved state with the current SSH sessions
-    echo "$current_logins" > "$SSH_ACTIVITY_LOGINS"
-
-    # Loop through the current logins to identify new sessions
-    while IFS= read -r current_login; do
-        # If the current session is not in the last recorded state, it's new
-        if ! grep -Fq "$current_login" <<< "$last_logins"; then
-            local user=$(echo "$current_login" | awk '{print $1}')
-            local ip=$(echo "$current_login" | awk '{print $2}' | tr -d '()')
-            local login_time=$(echo "$current_login" | awk '{print $3, $4, $5}')
-            local formatted_time=$(LC_ALL=C date -d "$login_time" +"%H:%M" 2>/dev/null)
-
-            # Check if the IP is within any of the excluded CIDR ranges or exact matches
-            if [[ $(check_ip_in_range "$ip") == "false" ]]; then
-                # Prepare and send the alert message
-                local message="New SSH login: User *[ $user ]* from IP *$ip* at $formatted_time."
-                echo "$message"  # Echo the message to the terminal for logging
-                send_telegram_alert "SSH-LOGIN" "$message"
-            else
-                echo "New SSH login: User *[ $user ]* from IP *$ip*. IP excluded, no alerts send."
-            fi
-        fi
-    done <<< "$current_logins"
-}
-
-
-# Function to check for new SFTP sessions
-# This function monitors active SFTP sessions by comparing the current sessions against a previously saved list.
-# It extracts each session's PID, start time, and associated network connections.
-# If a session is not in the saved list and the source IP isn't excluded based on predefined criteria,
-# it sends a Telegram alert with detailed connection information.
-# After checking, the function updates the saved list with current session details to log new sessions for future comparisons.
-# The goal is to monitor and alert on unauthorized or unexpected SFTP activity from non-excluded IP ranges.
-check_sftp_activity() {
-    # Fetch all PIDs for sftp-server processes along with their start times, parent PIDs, and full command
-    local current_sessions=$(LC_ALL=C ps -eo pid,ppid,lstart,cmd | grep [s]ftp-server | awk '{print $1, $2, $3, $4, $5, $6}')
-
-    # Read the last recorded session details from the log file and remove any leading/trailing whitespace
-    local last_sessions=$(cat "$SFTP_ACTIVITY_LOGINS" 2>/dev/null | sed 's/^[ \t]*//;s/[ \t]*$//')
-
-    # Loop through each current session to check if it's new
-    while IFS= read -r current_session; do
-        # Trim spaces from current session string for accurate comparison
-        local trimmed_session=$(echo "$current_session" | sed 's/^[ \t]*//;s/[ \t]*$//')
-
-        # Check if this session is already recorded to avoid duplicates
-        if ! grep -Fq "$trimmed_session" <<< "$last_sessions"; then
-            local pid=$(echo "$trimmed_session" | awk '{print $1}')    # Extract the PID
-            local ppid=$(echo "$trimmed_session" | awk '{print $2}')   # Extract the Parent PID
-	    local raw_date=$(echo "$current_session" | awk '{print $3, $4, $5, $6}') # Extract the full date string as it appears
-            local stime=$(LC_ALL=C date -d "$raw_date" +"%Y-%m-%d %H:%M")  # Format the start time correctly based on extracted raw date
-            local htime=$(LC_ALL=C date -d "$raw_date" +"%H:%M")  # Format the start time correctly based on extracted raw date
-
-            # Use 'ss' to fetch network connections associated with the PID or its parent
-            local connection_details=$(ss -tnp | grep -E "pid=$pid|pid=$ppid" | awk '{split($4, a, ":"); split($5, b, ":"); if (length(a[1]) > 0 && length(b[1]) > 0) print a[1], "<->", b[1]}')
-
-            # Parse source IP from connection details
-            local src_ip=$(echo "$connection_details" | awk '{print $3}')
-
-            # Check if the IP is within any of the excluded ranges
-            if [[ $(check_ip_in_range "$src_ip") == "false" ]]; then
-                # Check if there are valid network details to report
-                if [ -n "$connection_details" ]; then
-		    local message="New SFTP session: From IP *${src_ip}* at ${htime}"
-
-                    echo "$message"  # Output the message to terminal for logging
-                    send_telegram_alert "SFTP-MONITOR" "$message"  # Send the alert message through Telegram
-                    echo "$trimmed_session $stime ${connection_details}" >> "$SFTP_ACTIVITY_LOGINS"
-                fi
-            else
-                echo "New SFTP session from *$src_ip*. IP excluded, no alerts send."
-            fi
-        fi
-    done <<< "$current_sessions"
-}
-
-def monitor_loop():
-    global last_uptime
-    
-    # Crea i file di stato se non esistono
-    for filename in [SSH_ACTIVITY_LOGINS, SFTP_ACTIVITY_LOGINS]:
-        if not os.path.exists(os.path.dirname(filename)):
-            try:
-                os.makedirs(os.path.dirname(filename))
-            except:
-                pass
+# Funzione per inizializzare il bot e l'updater
+def init_bot():
+    global BOT_INSTANCE, UPDATER
+    if not BOT_INSTANCE and BOT_TOKEN:
         try:
-            if not os.path.exists(filename):
-                with open(filename, "w") as f:
-                    f.write("")
-        except:
-            print(f"Errore nella creazione del file {filename}")
-    
-    config = load_config()
-    try:
-        last_uptime = get_uptime()
-    except Exception as e:
-        print(f"Errore nel leggere l'uptime: {e}")
-        last_uptime = 0
-
-    # Imposta gli IP esclusi all'avvio
-    global EXCLUDED_IPS
-    if "excluded_ips" in config:
-        EXCLUDED_IPS = config["excluded_ips"]
-
-    print("Monitor loop avviato.")
-    last_check_time = 0
-    
-    while True:
-        try:
-            config = load_config()
+            BOT_INSTANCE = telegram.Bot(token=BOT_TOKEN)
+            UPDATER = Updater(token=BOT_TOKEN, use_context=True)
             
-            # Aggiorna la lista degli IP esclusi ad ogni ciclo
-            if "excluded_ips" in config:
-                EXCLUDED_IPS = config["excluded_ips"]
+            # Registra gli handler per i comandi
+            dp = UPDATER.dispatcher
+            dp.add_handler(CommandHandler("risorse", command_risorse))
+            dp.add_handler(CommandHandler("start", command_start))
+            dp.add_handler(CommandHandler("help", command_help))
+            dp.add_handler(CallbackQueryHandler(button_callback))
             
-            # Monitora risorse di sistema
-            cpu = psutil.cpu_percent(interval=1)
-            ram = psutil.virtual_memory().percent
-            disk = psutil.disk_usage("/").percent
-            net = psutil.net_io_counters().bytes_sent + psutil.net_io_counters().bytes_recv
-            
-            try:
-                uptime = get_uptime()
-            except:
-                uptime = 0
-            
-            # Invia avvisi per l'utilizzo elevato delle risorse
-            if cpu > config["cpu_threshold"]:
-                send_alert(f"⚠️ CPU alta: {cpu}%")
-
-            if ram > config["ram_threshold"]:
-                send_alert(f"⚠️ RAM alta: {ram}%")
-
-            if disk > config["disk_threshold"]:
-                send_alert(f"⚠️ DISK usage alto: {disk}%")
-
-            # Rileva riavvii del sistema
-            if uptime < last_uptime and config["notify_reboot"]:
-                send_alert("🔄 Server riavviato")
-            last_uptime = uptime
-            
-            # Controllo sessioni SSH e SFTP ogni 30 secondi (per evitare troppi controlli)
-            current_time = time.time()
-            if (current_time - last_check_time) >= 30:
-                print("\n--- Controllo sessioni ---")
-                
-                # Esegui il monitoraggio attivo delle sessioni SSH e SFTP
-                try:
-                    check_ssh_activity(config)
-                except Exception as e:
-                    print(f"Errore durante check_ssh_activity: {e}")
-                    
-                try:
-                    check_sftp_activity(config)
-                except Exception as e:
-                    print(f"Errore durante check_sftp_activity: {e}")
-                    
-                last_check_time = current_time
-                print("--- Fine controllo ---\n")
-
-            time.sleep(10)
-            
+            # Avvia il polling in un thread separato
+            UPDATER.start_polling(drop_pending_updates=True)
+            print("Bot Telegram inizializzato con successo")
+            return True
         except Exception as e:
-            print(f"Errore nel monitor_loop: {e}")
-            time.sleep(10)  # In caso di errore, aspetta comunque prima di riprovare
+            print(f"Errore nell'inizializzazione del bot Telegram: {e}")
+            return False
+    return bool(BOT_INSTANCE)
 
-def get_uptime():
-    try:
-        with open("/proc/uptime", "r") as f:
-            return float(f.readline().split()[0])
-    except:
+# Funzione per costruire la tastiera inline per i comandi
+def get_resource_keyboard():
+    keyboard = [
+        [
+            InlineKeyboardButton("CPU & RAM", callback_data="system_resources"),
+            InlineKeyboardButton("Disco", callback_data="disk_resources")
+        ],
+        [
+            InlineKeyboardButton("Top 5 Processi", callback_data="top_processes_5"),
+            InlineKeyboardButton("Top 10 Processi", callback_data="top_processes_10")
+        ],
+        [
+            InlineKeyboardButton("Rete", callback_data="network_resources"),
+            InlineKeyboardButton("Tutti", callback_data="all_resources")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+# Handler per il comando /risorse
+def command_risorse(update, context):
+    """Mostra la tastiera per richiedere le risorse"""
+    update.message.reply_text(
+        "Scegli quale informazione visualizzare:",
+        reply_markup=get_resource_keyboard()
+    )
+
+# Handler per il comando /start
+def command_start(update, context):
+    """Messaggio di benvenuto e introduzione al bot"""
+    update.message.reply_text(
+        "Benvenuto nel Server Monitor Bot!\n\n"
+        "Questo bot ti permette di monitorare lo stato del tuo server e ricevere notifiche "
+        "quando vengono rilevati eventi importanti come accessi SSH o utilizzo elevato delle risorse.\n\n"
+        "Usa /risorse per controllare lo stato attuale del server\n"
+        "Usa /help per vedere tutti i comandi disponibili"
+    )
+
+# Handler per il comando /help
+def command_help(update, context):
+    """Mostra i comandi disponibili"""
+    update.message.reply_text(
+        "Comandi disponibili:\n\n"
+        "/start - Avvia il bot\n"
+        "/help - Mostra questo messaggio di aiuto\n"
+        "/risorse - Visualizza le risorse del sistema\n"
+    )
+
+# Handler per i callback dei pulsanti
+def button_callback(update, context):
+    """Gestisce i callback dai pulsanti inline"""
+    query = update.callback_query
+    query.answer()
+    
+    # Import qui per evitare import circolari
+    from monitor import get_system_resources, get_disk_info, get_network_info, get_top_processes
+    
+    data = query.data
+    
+    if data == "system_resources":
+        resources = get_system_resources()
+        query.edit_message_text(text=resources, parse_mode="Markdown")
+    
+    elif data == "disk_resources":
+        disk_info = get_disk_info()
+        query.edit_message_text(text=disk_info, parse_mode="Markdown")
+    
+    elif data == "network_resources":
+        net_info = get_network_info()
+        query.edit_message_text(text=net_info, parse_mode="Markdown")
+    
+    elif data.startswith("top_processes_"):
+        num = int(data.split("_")[-1])
+        processes = get_top_processes(num)
+        query.edit_message_text(text=processes, parse_mode="Markdown")
+    
+    elif data == "all_resources":
+        # Raccoglie tutte le informazioni
+        resources = get_system_resources()
+        disk_info = get_disk_info()
+        net_info = get_network_info()
+        processes = get_top_processes(5)
+        
+        # Combina tutte le informazioni in un unico messaggio
+        all_info = f"{resources}\n\n{disk_info}\n\n{net_info}\n\n{processes}"
+        query.edit_message_text(text=all_info, parse_mode="Markdown")
+    
+    # Aggiungi il pulsante per tornare al menu principale
+    query.edit_message_reply_markup(
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ Torna al menu", callback_data="back_to_menu")]
+        ])
+    )
+    
+    if data == "back_to_menu":
+        query.edit_message_text(
+            text="Scegli quale informazione visualizzare:",
+            reply_markup=get_resource_keyboard()
+        )
+
+def send_alert(message):
+    max_retries = 3
+    retry_delay = 2
+    
+    # Inizializza il bot se non è già stato fatto
+    if not init_bot():
+        print("ERRORE: Impossibile inizializzare il bot Telegram")
+        return
+    
+    for attempt in range(max_retries):
         try:
-            # Fallback per Docker: leggi uptime del sistema host
-            with open("/host/proc/uptime", "r") as f:
-                return float(f.readline().split()[0])
-        except:
-            return 0  # Se non riusciamo a leggere l'uptime, restituiamo 0
+            print(f"Invio messaggio Telegram: {message}")
+            
+            # Verifica che il token e il chat ID siano impostati
+            if not BOT_TOKEN or BOT_TOKEN == "token":
+                print("ERRORE: BOT_TOKEN non configurato correttamente")
+                return
+                
+            if not CHAT_ID or CHAT_ID == "id":
+                print("ERRORE: CHAT_ID non configurato correttamente")
+                return
+            
+            result = BOT_INSTANCE.send_message(chat_id=CHAT_ID, text=message, parse_mode="Markdown")
+            print(f"Messaggio inviato con successo: {result}")
+            return
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"Errore invio messaggio Telegram (tentativo {attempt+1}/{max_retries}): {e}")
+                time.sleep(retry_delay)
+            else:
+                print(f"Errore invio messaggio Telegram (tutti i tentativi falliti): {e}")
 
-if __name__ == "__main__":
-    monitor_loop()
+# Inizializza il bot quando il modulo viene importato
+init_bot()
