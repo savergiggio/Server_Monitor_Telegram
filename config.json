@@ -1,9 +1,12 @@
 {
-    "cpu_threshold": 80,
-    "ram_threshold": 80,
-    "disk_threshold": 90,
-    "net_threshold": 1000000,
-    "notify_ssh": true,
-    "notify_reboot": true,
-    "excluded_ips": ["127.0.0.1", "192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]
+  "cpu_threshold": 80,
+  "ram_threshold": 80,
+  "disk_threshold": 90,
+  "net_threshold": 1000000,
+  "notify_ssh": true,
+  "notify_reboot": true,
+  "excluded_ips": ["127.0.0.1", "192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"],
+  "top_processes": 5,
+  "bot_token": "",
+  "chat_id": ""
 }
